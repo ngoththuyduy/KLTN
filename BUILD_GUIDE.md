@@ -185,14 +185,16 @@ Quy trinh goi y:
    - `GEMINI_API_KEY=<key that>`
    - `FIREBASE_SERVICE_ACCOUNT_JSON=<service account json>` neu can user auth that.
 4. Chay `npm run build`.
-5. Cau hinh entry point la:
+5. Cau hinh entry point uu tien cho Plesk/Passenger la:
 
 ```text
-app.js
+plesk-start.cjs
 ```
 
 6. Restart app tren host.
 7. Mo `/api/health` de kiem tra.
+
+Neu host khong cho dung `.cjs`, co the thu `app.js`, nhung Plesk/Passenger nen dung `plesk-start.cjs` vi file nay khoi dong backend production va tra JSON chan doan neu thieu `dist/server.js` hoac loi import.
 
 ## 12. Lenh thuong dung
 
@@ -233,7 +235,24 @@ Neu false, them `FIREBASE_SERVICE_ACCOUNT_JSON` tren host.
 
 ### Build thanh cong nhung mo route bi 404
 
-Dam bao dang chay `node app.js`, khong chi serve rieng folder `dist`. Backend Express trong `app.js` co SPA fallback cho React Router.
+Dam bao startup file la `plesk-start.cjs` hoac `app.js`, khong dung file chi serve rieng folder `dist` nhu `static_dist`. Backend Express co SPA fallback cho React Router va cac `/api/*` routes.
+
+### Passenger bao Web application could not be started
+
+1. Doi startup file sang:
+
+```text
+plesk-start.cjs
+```
+
+2. Restart app.
+3. Mo:
+
+```text
+https://domain-cua-ban/api/health
+```
+
+Neu `plesk-start.cjs` chay duoc, endpoint nay se tra JSON. Neu backend bundle thieu, JSON se noi ro `distServerExists: false`.
 
 ### Port bi trung
 

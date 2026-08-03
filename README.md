@@ -23,6 +23,14 @@ View your app in AI Studio: https://ai.studio/apps/7c538a8a-5a0c-416e-bebd-c847b
 
 On hosting/Plesk/Passenger, configure `GEMINI_API_KEY` as a server environment variable, or upload a server-readable `.env` / `.env.local` next to `app.js`.
 
+For Plesk/Passenger, use this startup file:
+
+```text
+plesk-start.cjs
+```
+
+Do not use a static-only startup such as `static_dist`, because `/api/*` routes need the Express backend.
+
 After deploy, open `/api/health` and check:
 
 - `geminiConfigured: true`
