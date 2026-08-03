@@ -42,6 +42,7 @@ import { generateAutoInsights } from '@/services/insightService';
 import { generateAutoReports } from '@/services/reportService';
 import { 
   getLocalFiles, 
+  getLocalFileRecords,
   saveLocalFile, 
   saveLocalFileRecords, 
   deleteLocalFile, 
@@ -58,6 +59,7 @@ import { useAuth } from '@/lib/AuthContext';
 
 export default function DataManagement() {
   const { profile } = useAuth();
+  const isDemoSession = Boolean(profile?.id?.startsWith('demo_'));
   const [files, setFiles] = useState<SalesFile[]>(() => mergeFiles([], getLocalFiles()));
   const [isUploading, setIsUploading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -83,11 +85,19 @@ export default function DataManagement() {
   const healingInProgressRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    const activeUserId = profile?.id;
+    if (!activeUserId) return;
+
+    if (isDemoSession) {
+      setFiles(mergeFiles([], getLocalFiles()));
+      return;
+    }
+
     // Initial sync from local storage and sync local files up to Firestore
     setFiles(mergeFiles([], getLocalFiles()));
-    syncLocalFilesToFirestore(db).catch(err => console.warn("Background sync error:", err));
+    syncLocalFilesToFirestore(db, activeUserId).catch(err => console.warn("Background sync error:", err));
 
-    const q = query(collection(db, 'files'));
+    const q = query(collection(db, 'files'), where('ownerId', '==', activeUserId));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const filesData = snapshot.docs.map(doc => ({
         id: doc.id,
@@ -121,7 +131,7 @@ export default function DataManagement() {
               }
               
               if (recordsToProcess.length > 0) {
-                await ingestUploadedFile(f.id, f.fileName, recordsToProcess);
+                await ingestUploadedFile(f.id, f.fileName, recordsToProcess, activeUserId);
                 await updateDoc(doc(db, 'files', f.id), {
                   status: 'COMPLETED',
                   embeddingStatus: 'READY',
@@ -146,7 +156,7 @@ export default function DataManagement() {
     }, async (error) => {
       console.warn("Firestore onSnapshot notice, using local files fallback:", error);
       try {
-        const snap = await getDocs(query(collection(db, 'files')));
+        const snap = await getDocs(query(collection(db, 'files'), where('ownerId', '==', activeUserId)));
         const fallbackFiles = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as SalesFile[];
         setFiles(mergeFiles(fallbackFiles, getLocalFiles()));
       } catch (fallbackErr) {
@@ -155,7 +165,7 @@ export default function DataManagement() {
       }
     });
     return unsubscribe;
-  }, [profile]);
+  }, [profile, isDemoSession]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -208,9 +218,11 @@ export default function DataManagement() {
 
         // Clear previous files locally & mark them as deleted so system holds exactly 1 active file
         clearAllLocalFiles();
-        DEFAULT_SAMPLE_IDS.forEach(sampleId => {
-          deleteDoc(doc(db, 'files', sampleId)).catch(() => {});
-        });
+        if (!isDemoSession) {
+          DEFAULT_SAMPLE_IDS.forEach(sampleId => {
+            deleteDoc(doc(db, 'files', sampleId)).catch(() => {});
+          });
+        }
 
         // 1. Create file record locally FIRST
         const newFileObj: SalesFile = {
@@ -233,8 +245,10 @@ export default function DataManagement() {
         setFiles([newFileObj]);
 
         // 2. Write doc to Firestore immediately!
-        try {
+        if (!isDemoSession) try {
           const firestorePayload = sanitizeForFirestore({
+            ownerId: profile?.id,
+            createdBy: profile?.id,
             fileName: targetFileName,
             uploadDate: new Date().toISOString(),
             uploadedBy: profile?.fullName || 'Thủy Duy Ngô',
@@ -253,7 +267,7 @@ export default function DataManagement() {
         setIsUploading(false);
 
         // 3. Perform long-running subcollection writes & AI background routines asynchronously
-        (async () => {
+        if (!isDemoSession) (async () => {
 
           // Batch write records in background for structural backward-compatibility
           try {
@@ -268,6 +282,7 @@ export default function DataManagement() {
                 batch.set(recordRef, {
                   ...row,
                   fileId: targetFileId,
+                  ownerId: profile?.id,
                   date: row.Date || row.date || new Date().toISOString()
                 });
               });
@@ -281,7 +296,7 @@ export default function DataManagement() {
           // Run heavy AI chunking, vector searching, report compilation and insights generation in background
           try {
             console.log("RAG background ingestion started for:", targetFileName);
-            await ingestUploadedFile(targetFileId, targetFileName, cleanJsonData);
+            await ingestUploadedFile(targetFileId, targetFileName, cleanJsonData, profile?.id);
             await updateDoc(doc(db, 'files', targetFileId), { embeddingStatus: 'READY' }).catch(() => {});
             console.log("RAG background ingestion completed.");
           } catch (ragError) {
@@ -289,8 +304,8 @@ export default function DataManagement() {
           }
 
           try {
-            await generateAutoInsights(targetFileId, targetFileName, cleanJsonData);
-            await generateAutoReports(targetFileId, targetFileName, cleanJsonData);
+            await generateAutoInsights(targetFileId, targetFileName, cleanJsonData, profile?.id);
+            await generateAutoReports(targetFileId, targetFileName, cleanJsonData, profile?.id);
           } catch (aiErr) {
             console.error("Background AI generation notice:", aiErr);
           }
@@ -322,6 +337,12 @@ export default function DataManagement() {
     setFiles(prev => prev.filter(f => f.id !== targetId));
 
     try {
+      if (isDemoSession) {
+        toast.dismiss(loadingToastId);
+        toast.success('ÄÃ£ xÃ³a file thÃ nh cÃ´ng');
+        setDeleteConfirmFileId(null);
+        return;
+      }
       // 1. Delete all records under files/{fileId}/records in Firestore
       try {
         const recordsRef = collection(db, `files/${targetId}/records`);
@@ -345,7 +366,7 @@ export default function DataManagement() {
       // 2. Delete knowledge_chunks
       try {
         const chunksRef = collection(db, 'knowledge_chunks');
-        const q = query(chunksRef, where('sourceFileId', '==', targetId));
+        const q = query(chunksRef, where('sourceFileId', '==', targetId), where('ownerId', '==', profile?.id || ''));
         const qSnap = await getDocs(q);
         if (!qSnap.empty) {
           const delBatch = writeBatch(db);
@@ -394,10 +415,16 @@ export default function DataManagement() {
     setFiles([]);
 
     try {
+      if (isDemoSession) {
+        toast.dismiss(loadingToastId);
+        toast.success('ÄÃ£ xÃ³a toÃ n bá»™ dá»¯ liá»‡u nguá»“n thÃ nh cÃ´ng!');
+        setDeleteAllConfirmOpen(false);
+        return;
+      }
       // 1. Delete all knowledge_chunks
       try {
         const chunksRef = collection(db, 'knowledge_chunks');
-        const chunksSnap = await getDocs(chunksRef);
+        const chunksSnap = await getDocs(query(chunksRef, where('ownerId', '==', profile?.id || '')));
         if (!chunksSnap.empty) {
           const batchSize = 500;
           const chunkDocs = chunksSnap.docs;
@@ -455,6 +482,11 @@ export default function DataManagement() {
   const handleForceComplete = async (fileId: string, fileName: string) => {
     const loadingToastId = toast.loading('Đang kích hoạt và cứu hộ đồng bộ dữ liệu...');
     try {
+      if (isDemoSession) {
+        toast.dismiss(loadingToastId);
+        toast.success('Dá»¯ liá»‡u demo Ä‘ang sáºµn sÃ ng trong phiÃªn nÃ y.');
+        return;
+      }
       // 1. Fetch any records from the subcollection so we can backport them to the records array in the parent document
       const recordsRef = collection(db, `files/${fileId}/records`);
       const recordsSnap = await getDocs(query(recordsRef, limit(10000)));
@@ -482,20 +514,20 @@ export default function DataManagement() {
       (async () => {
         try {
           if (recordsData.length > 0) {
-            await ingestUploadedFile(fileId, fileName, recordsData);
+            await ingestUploadedFile(fileId, fileName, recordsData, profile?.id);
             await updateDoc(doc(db, 'files', fileId), {
               embeddingStatus: 'READY'
             });
             console.log("RAG ingestion rescue finished.");
 
             try {
-              await generateAutoInsights(fileId, fileName, recordsData);
+              await generateAutoInsights(fileId, fileName, recordsData, profile?.id);
             } catch (insErr) {
               console.error("Insights generation rescue failed:", insErr);
             }
 
             try {
-              await generateAutoReports(fileId, fileName, recordsData);
+              await generateAutoReports(fileId, fileName, recordsData, profile?.id);
             } catch (repErr) {
               console.error("Reports generation rescue failed:", repErr);
             }
@@ -534,6 +566,12 @@ export default function DataManagement() {
 
     const loadToastId = toast.loading('Đang tải dữ liệu chi tiết từ máy chủ...');
     try {
+      if (isDemoSession) {
+        const localRecords = getLocalFileRecords(file.id);
+        setModalRecords(localRecords.length > 0 ? localRecords : (file.records || file.sampleRows || []));
+        toast.dismiss(loadToastId);
+        return;
+      }
       const recordsRef = collection(db, `files/${file.id}/records`);
       const snap = await getDocs(query(recordsRef, limit(10000)));
       let loadedRecords = snap.docs.map(doc => doc.data());
@@ -625,6 +663,24 @@ export default function DataManagement() {
       const fileId = selectedFile.id;
       const fileName = selectedFile.fileName;
 
+      if (isDemoSession) {
+        const updatedFile = {
+          ...selectedFile,
+          sampleRows: modalRecords.slice(0, 50),
+          recordCount: modalRecords.length,
+          status: 'COMPLETED' as const,
+          embeddingStatus: 'READY' as const
+        };
+        saveLocalFile(updatedFile);
+        saveLocalFileRecords(fileId, modalRecords);
+        setFiles(prev => prev.map(f => f.id === fileId ? updatedFile : f));
+        toast.dismiss(loadingToastId);
+        toast.success('ÄÃ£ lÆ°u thay Ä‘á»•i trong phiÃªn demo nÃ y.');
+        setIsOpenViewEditModal(false);
+        setSelectedFile(null);
+        return;
+      }
+
       // 1. Update main file document with metadata & sample
       await updateDoc(doc(db, 'files', fileId), {
         sampleRows: modalRecords.slice(0, 50),
@@ -680,7 +736,7 @@ export default function DataManagement() {
       // 3. Refresh knowledge chunks (delete old, then re-ingest)
       try {
         const chunksRef = collection(db, 'knowledge_chunks');
-        const q = query(chunksRef, where('sourceFileId', '==', fileId));
+        const q = query(chunksRef, where('sourceFileId', '==', fileId), where('ownerId', '==', profile?.id || ''));
         const qSnap = await getDocs(q);
         if (!qSnap.empty) {
           const delBatch = writeBatch(db);
@@ -697,7 +753,7 @@ export default function DataManagement() {
       (async () => {
         try {
           console.log("RAG ingestion re-sync starting for:", fileName);
-          await ingestUploadedFile(fileId, fileName, modalRecords);
+          await ingestUploadedFile(fileId, fileName, modalRecords, profile?.id);
           
           await updateDoc(doc(db, 'files', fileId), {
             embeddingStatus: 'READY'
@@ -706,12 +762,12 @@ export default function DataManagement() {
 
           // Re-generate auto-insights and reports in background
           try {
-            await generateAutoInsights(fileId, fileName, modalRecords);
+            await generateAutoInsights(fileId, fileName, modalRecords, profile?.id);
           } catch (insErr) {
             console.warn("Failed to regenerate insights:", insErr);
           }
           try {
-            await generateAutoReports(fileId, fileName, modalRecords);
+            await generateAutoReports(fileId, fileName, modalRecords, profile?.id);
           } catch (repErr) {
             console.warn("Failed to regenerate reports:", repErr);
           }

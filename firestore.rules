@@ -1,8 +1,137 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function currentUser() {
+      return signedIn() && exists(userPath(request.auth.uid))
+        ? get(userPath(request.auth.uid)).data
+        : {};
+    }
+
+    function isActive() {
+      return signedIn() && currentUser().status == 'ACTIVE';
+    }
+
+    function hasRole(role) {
+      return isActive() && currentUser().role == role;
+    }
+
+    function isSystemAdmin() {
+      return hasRole('SYSTEM_ADMIN');
+    }
+
+    function isOwner(data) {
+      return signedIn() && (
+        data.ownerId == request.auth.uid ||
+        data.userId == request.auth.uid ||
+        data.createdBy == request.auth.uid
+      );
+    }
+
+    function canReadOwned(data) {
+      return isSystemAdmin() || isOwner(data);
+    }
+
+    function canWriteOwned(data) {
+      return isSystemAdmin() || isOwner(data);
+    }
+
+    function canReadFile(fileId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/files/$(fileId))
+        && canReadOwned(get(/databases/$(database)/documents/files/$(fileId)).data);
+    }
+
+    function canWriteFile(fileId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/files/$(fileId))
+        && canWriteOwned(get(/databases/$(database)/documents/files/$(fileId)).data);
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isSystemAdmin());
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.id == uid
+        && request.resource.data.role == 'SALES_MANAGER'
+        && request.resource.data.status == 'ACTIVE';
+      allow update: if signedIn() && (
+        isSystemAdmin() ||
+        (
+          request.auth.uid == uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['fullName', 'email'])
+        )
+      );
+      allow delete: if isSystemAdmin() && request.auth.uid != uid;
+    }
+
+    match /config/{configId} {
+      allow read, write: if isSystemAdmin();
+    }
+
+    match /files/{fileId} {
+      allow read: if signedIn() && canReadOwned(resource.data);
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if signedIn() && canWriteOwned(resource.data);
+
+      match /records/{recordId} {
+        allow read: if canReadFile(fileId);
+        allow create, update, delete: if canWriteFile(fileId);
+      }
+    }
+
+    match /knowledge_chunks/{chunkId} {
+      allow read: if signedIn() && canReadOwned(resource.data);
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if signedIn() && canWriteOwned(resource.data);
+    }
+
+    match /chat_sessions/{sessionId} {
+      allow read: if signedIn() && canReadOwned(resource.data);
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if signedIn() && canWriteOwned(resource.data);
+
+      match /messages/{messageId} {
+        allow read: if signedIn()
+          && exists(/databases/$(database)/documents/chat_sessions/$(sessionId))
+          && canReadOwned(get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data);
+        allow create, update, delete: if signedIn()
+          && exists(/databases/$(database)/documents/chat_sessions/$(sessionId))
+          && canWriteOwned(get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data);
+      }
+    }
+
+    match /reports/{reportId} {
+      allow read: if signedIn() && canReadOwned(resource.data);
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if signedIn() && canWriteOwned(resource.data);
+    }
+
+    match /insights/{insightId} {
+      allow read: if signedIn() && canReadOwned(resource.data);
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if signedIn() && canWriteOwned(resource.data);
+    }
+
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

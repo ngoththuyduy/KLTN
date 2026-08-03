@@ -20,7 +20,7 @@ export interface SalesInsight {
   };
 }
 
-export async function generateAutoInsights(fileId: string, fileName: string, rows: any[]): Promise<SalesInsight | null> {
+export async function generateAutoInsights(fileId: string, fileName: string, rows: any[], ownerId?: string): Promise<SalesInsight | null> {
   if (!rows || rows.length === 0) return null;
 
   // 1. Process and parse all entries
@@ -165,6 +165,8 @@ Không sử dụng emoji, giữ văn phong trang trọng, khách quan.`;
   try {
     const docRef = await addDoc(collection(db, 'insights'), {
       ...insightDoc,
+      ownerId: ownerId || 'shared_user',
+      createdBy: ownerId || 'shared_user',
       generatedAt: serverTimestamp() // replace for server timestamp
     });
     insightDoc.id = docRef.id;

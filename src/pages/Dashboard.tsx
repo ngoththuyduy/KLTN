@@ -66,6 +66,7 @@ import { Sliders as SliderIcon } from 'lucide-react';
 import { collection, query, limit, getDocs, orderBy, where, onSnapshot, addDoc, doc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { chatWithAI } from '@/lib/gemini';
+import { authenticatedFetch } from '@/lib/api';
 import { toast } from 'sonner';
 import { cn, stripModernColors, runWithCleanStyles } from '@/lib/utils';
 import { extractSalesRecord, ParsedSalesRow } from '@/utils/salesParser';
@@ -93,6 +94,7 @@ const DEFAULT_BULLETS = [
 
 export default function Dashboard() {
   const { profile } = useAuth();
+  const isDemoSession = Boolean(profile?.id?.startsWith('demo_'));
   const [isExcelModalOpen, setIsExcelModalOpen] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'geography' | 'timeline' | 'products' | 'people' | 'copilot' | 'autodash'>('overview');
@@ -800,7 +802,7 @@ export default function Dashboard() {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(resource, {
+      const response = await authenticatedFetch(resource, {
         ...options,
         signal: controller.signal
       });
@@ -1156,11 +1158,26 @@ export default function Dashboard() {
 
   // Listen to completed Firestore files & LocalStorage files
   useEffect(() => {
+    if (!profile?.id) return;
     setLoading(true);
-    syncLocalFilesToFirestore(db).catch(err => console.warn("Background sync error:", err));
+    if (isDemoSession) {
+      const localMerged = mergeFiles([], getLocalFiles());
+      const initialSubMap: Record<string, any[]> = {};
+      localMerged.forEach(f => {
+        const localRecs = getLocalFileRecords(f.id);
+        initialSubMap[f.id] = (localRecs && localRecs.length > 0) ? localRecs : (f.sampleRows || []);
+      });
+      setSubRecordsMap(initialSubMap);
+      setAvailableFiles(localMerged);
+      setShowMockState(false);
+      setLoading(false);
+      return;
+    }
+    syncLocalFilesToFirestore(db, profile.id).catch(err => console.warn("Background sync error:", err));
 
     const q = query(
       collection(db, 'files'),
+      where('ownerId', '==', profile.id),
       limit(50)
     );
 
@@ -1219,7 +1236,7 @@ export default function Dashboard() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [profile?.id, isDemoSession]);
 
   // Load complete 5000+ records from subcollections in background when files are selected
   useEffect(() => {
@@ -1662,10 +1679,13 @@ export default function Dashboard() {
       setAvailableFiles(prev => [newFileObj, ...prev.filter(f => f.id !== targetFileId)]);
       setSubRecordsMap(prev => ({ ...prev, [targetFileId]: cleanRows }));
       setSelectedFileId(targetFileId);
+      setShowMockState(false);
 
       // Sync doc to Firestore immediately
-      try {
+      if (!isDemoSession) try {
         const firestorePayload = sanitizeForFirestore({
+          ownerId: profile?.id,
+          createdBy: profile?.id,
           fileName: targetFileName,
           uploadDate: new Date().toISOString(),
           uploadedBy: profile?.fullName || 'Người dùng',
@@ -1689,7 +1709,7 @@ export default function Dashboard() {
       setPendingUploadFile(null);
       setCleanedData(null);
 
-      (async () => {
+      if (!isDemoSession) (async () => {
         try {
           console.log("Writing subcollection records in background...");
           const batchSize = 500;
@@ -1702,6 +1722,7 @@ export default function Dashboard() {
               batch.set(recordRef, sanitizeForFirestore({
                 ...row,
                 fileId: targetFileId,
+                ownerId: profile?.id,
                 date: row.Date || row.date || row["Ngày Mua"] || new Date().toISOString()
               }));
             });
@@ -1714,7 +1735,7 @@ export default function Dashboard() {
         
         try {
           console.log("RAG background ingestion started for:", targetFileName);
-          await ingestUploadedFile(targetFileId, targetFileName, finalRows);
+          await ingestUploadedFile(targetFileId, targetFileName, finalRows, profile?.id);
           await updateDoc(doc(db, 'files', targetFileId), {
             embeddingStatus: 'READY'
           }).catch(() => {});
@@ -1724,8 +1745,8 @@ export default function Dashboard() {
         }
 
         try {
-          await generateAutoInsights(targetFileId, targetFileName, finalRows);
-          await generateAutoReports(targetFileId, targetFileName, finalRows);
+          await generateAutoInsights(targetFileId, targetFileName, finalRows, profile?.id);
+          await generateAutoReports(targetFileId, targetFileName, finalRows, profile?.id);
         } catch (aiErr) {
           console.error("Auto generation notice:", aiErr);
         }
@@ -1786,7 +1807,7 @@ export default function Dashboard() {
         setQualityStats(stats);
         
         try {
-          const response = await fetch('/api/data-quality-check', {
+          const response = await authenticatedFetch('/api/data-quality-check', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -2176,7 +2197,7 @@ export default function Dashboard() {
       if (smtpPort) localStorage.setItem("sales_smtp_port", smtpPort);
 
       // 2. Post to our backend
-      const response = await fetch("/api/send-email", {
+      const response = await authenticatedFetch("/api/send-email", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"

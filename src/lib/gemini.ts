@@ -1,23 +1,30 @@
+import { authenticatedFetch } from './api';
+
 export const modelName = "gemini-2.5-flash";
 
 export async function chatWithAI(message: string, history: any[] = [], systemInstruction?: string) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), 120000);
   
-  const customKey = typeof window !== 'undefined' ? localStorage.getItem('gemini_custom_api_key') : null;
-
   try {
-    const response = await fetch("/api/chat", {
+    const response = await authenticatedFetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, history, systemInstruction, geminiApiKey: customKey }),
+      body: JSON.stringify({ message, history, systemInstruction }),
       signal: controller.signal
     });
     
     clearTimeout(id);
     
     if (!response.ok) {
-      throw new Error("Failed to communicate with AI server");
+      let message = "Failed to communicate with AI server";
+      try {
+        const data = await response.json();
+        message = data?.message || data?.error || message;
+      } catch {
+        // Keep generic message when server did not return JSON.
+      }
+      throw new Error(message);
     }
     
     return await response.json();
@@ -31,20 +38,25 @@ export async function chatWithAI(message: string, history: any[] = [], systemIns
 export async function analyzeData(data: any, query: string) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), 120000);
-  const customKey = typeof window !== 'undefined' ? localStorage.getItem('gemini_custom_api_key') : null;
-
   try {
-    const response = await fetch("/api/analyze", {
+    const response = await authenticatedFetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data, query, geminiApiKey: customKey }),
+      body: JSON.stringify({ data, query }),
       signal: controller.signal
     });
     
     clearTimeout(id);
     
     if (!response.ok) {
-      throw new Error("Failed to analyze data via AI server");
+      let message = "Failed to analyze data via AI server";
+      try {
+        const data = await response.json();
+        message = data?.message || data?.error || message;
+      } catch {
+        // Keep generic message when server did not return JSON.
+      }
+      throw new Error(message);
     }
     
     return await response.json();

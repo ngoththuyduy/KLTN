@@ -55,6 +55,7 @@ import { getLocalFiles, getLocalFileRecords, mergeFiles, syncLocalFilesToFiresto
 import { getLocalReports, saveLocalReport, mergeReports, syncLocalReportsToFirestore } from "@/lib/reportStorage";
 import { Report } from "@/types";
 import { chatWithAI, modelName } from "@/lib/gemini";
+import { authenticatedFetch } from "@/lib/api";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/AuthContext";
 import {
@@ -69,12 +70,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import rehypeKatex from "rehype-katex";
 import { printElement } from "@/lib/utils";
 import { AIAccuracyEvaluation } from "@/components/AIAccuracyEvaluation";
 
 export default function Reports() {
   const { profile } = useAuth();
+  const isDemoSession = Boolean(profile?.id?.startsWith('demo_'));
   const [reports, setReports] = useState<Report[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [activeTab, setActiveTab] = useState<'reports' | 'evaluation'>('reports');
@@ -100,7 +103,7 @@ export default function Reports() {
   useEffect(() => {
     const fetchConfig = async () => {
       try {
-        const res = await fetch('/api/config');
+        const res = await authenticatedFetch('/api/config');
         if (res.ok) {
           const data = await res.json();
           setGlobalConfig({
@@ -141,14 +144,19 @@ export default function Reports() {
   }, [profile]);
 
   useEffect(() => {
+    if (!profile?.id) return;
+    if (isDemoSession) {
+      setReports(mergeReports([], getLocalReports()));
+      return;
+    }
     // 1. Sync local reports to Firestore in background
-    syncLocalReportsToFirestore(db).catch(err => console.warn("Sync reports notice:", err));
+    syncLocalReportsToFirestore(db, profile.id).catch(err => console.warn("Sync reports notice:", err));
 
     // 2. Load local reports instantly
     setReports(mergeReports([], getLocalReports()));
 
     // 3. Listen to Firestore
-    const q = query(collection(db, "reports"), orderBy("createdAt", "desc"));
+    const q = query(collection(db, "reports"), where("ownerId", "==", profile.id), orderBy("createdAt", "desc"));
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
@@ -162,19 +170,25 @@ export default function Reports() {
       },
     );
     return unsubscribe;
-  }, []);
+  }, [profile?.id, isDemoSession]);
 
   const handleGenerateReport = async (type: "DAILY" | "WEEKLY" | "MONTHLY") => {
     setIsGenerating(true);
     try {
       // 1. Sync local files in background and fetch sales dataset from Firestore & LocalStorage
-      syncLocalFilesToFirestore(db).catch(err => console.warn("Sync local files error:", err));
+      if (!isDemoSession) {
+        syncLocalFilesToFirestore(db, profile?.id).catch(err => console.warn("Sync local files error:", err));
+      }
       
       let firestoreFiles: any[] = [];
       try {
+        if (isDemoSession) {
+          throw new Error('demo-local-only');
+        }
         const filesSnap = await getDocs(
           query(
             collection(db, "files"),
+            where("ownerId", "==", profile?.id || ""),
             orderBy("uploadDate", "desc"),
             limit(30),
           ),
@@ -264,7 +278,9 @@ export default function Reports() {
       setReports(prev => mergeReports([], [newReportObj, ...prev]));
 
       try {
-        await setDoc(doc(db, "reports", newReportId), {
+        if (!isDemoSession) await setDoc(doc(db, "reports", newReportId), {
+          ownerId: profile?.id,
+          createdBy: profile?.id,
           title: newReportObj.title,
           content: newReportObj.content,
           generatedBy: newReportObj.generatedBy,
@@ -636,7 +652,7 @@ export default function Reports() {
                   onClick={async () => {
                     setIsSavingConfig(true);
                     try {
-                      const res = await fetch('/api/config', {
+                      const res = await authenticatedFetch('/api/config', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(globalConfig)
@@ -671,7 +687,7 @@ export default function Reports() {
                     const toastId = toast.loading("Hệ thống đang sinh báo cáo chiến lược & gửi email...");
                     try {
                       // Save settings first
-                      const res = await fetch('/api/config', {
+                      const res = await authenticatedFetch('/api/config', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(globalConfig)
@@ -682,7 +698,7 @@ export default function Reports() {
                       }
                       setSchedulerTime(globalConfig.schedulerTime);
 
-                      const triggerRes = await fetch("/api/trigger-daily-scheduler", {
+                      const triggerRes = await authenticatedFetch("/api/trigger-daily-scheduler", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" }
                       });
@@ -813,7 +829,7 @@ export default function Reports() {
                             <div className="markdown-body text-slate-800 leading-relaxed font-medium">
                               <ReactMarkdown
                                 remarkPlugins={[remarkGfm, remarkMath]}
-                                rehypePlugins={[rehypeRaw, rehypeKatex]}
+                                rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeKatex]}
                               >
                                 {report.content}
                               </ReactMarkdown>

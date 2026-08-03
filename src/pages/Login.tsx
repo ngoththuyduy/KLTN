@@ -16,6 +16,8 @@ import { signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPass
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { UserRole, UserProfile } from '../types';
 
+const DEMO_AUTH_ENABLED = (import.meta as any).env?.VITE_ENABLE_DEMO_AUTH !== 'false';
+
 export default function Login() {
   const navigate = useNavigate();
   const { loginAsDemo, loginWithProfile } = useAuth();
@@ -26,7 +28,7 @@ export default function Login() {
   const [loadingEmail, setLoadingEmail] = useState(false);
   
   const [demoName, setDemoName] = useState('Khách thử nghiệm');
-  const [selectedRole, setSelectedRole] = useState<UserRole>('SYSTEM_ADMIN');
+  const [selectedRole, setSelectedRole] = useState<UserRole>('SALES_MANAGER');
   const [loadingGoogle, setLoadingGoogle] = useState(false);
   const [loadingDemo, setLoadingDemo] = useState(false);
 
@@ -66,7 +68,7 @@ export default function Login() {
           id: googleUser.uid,
           email: googleUser.email || '',
           fullName: googleUser.displayName || googleUser.email?.split('@')[0] || 'Người dùng',
-          role: 'SYSTEM_ADMIN', // Default role
+          role: 'SALES_MANAGER',
           status: 'ACTIVE',
           createdAt: new Date().toISOString()
         };
@@ -97,7 +99,7 @@ export default function Login() {
           id: u.uid,
           email: u.email || '',
           fullName: u.displayName || u.email?.split('@')[0] || 'Người dùng Google',
-          role: selectedRole,
+          role: 'SALES_MANAGER',
           status: 'ACTIVE',
           createdAt: new Date().toISOString()
         };
@@ -116,17 +118,13 @@ export default function Login() {
         error.message?.includes('permissions') ||
         error.message?.includes('permission-denied')
       ) {
-        // Automatically switch to demo/bypass as helpful fallback for custom domain/iframe auth
-        loginAsDemo(demoName || 'Quản trị viên Google', selectedRole);
-        if (error.code === 'auth/unauthorized-domain' || error.message?.includes('unauthorized-domain')) {
-          toast.warning(
-            "Tên miền 'kltn.ungdungai.biz.vn' chưa được thêm vào Authorized Domains trên Firebase Console. Đã chuyển sang phiên Quản trị để trải nghiệm ngay!", 
-            { duration: 8000 }
-          );
+        if (DEMO_AUTH_ENABLED) {
+          loginAsDemo(demoName || 'Demo User', selectedRole);
+          toast.info('Đã chuyển sang chế độ demo do đăng nhập Google bị chặn.');
+          navigate('/');
         } else {
-          toast.info("Chuyển sang Chế độ Quản trị thử nghiệm do hạn chế Popup/Môi trường iFrame.");
+          toast.error('Không thể đăng nhập Google. Vui lòng kiểm tra Authorized Domains trong Firebase Console.');
         }
-        navigate('/');
       } else {
         toast.error("Lỗi đăng nhập Google: " + error.message);
       }
@@ -151,7 +149,7 @@ export default function Login() {
           id: user.uid,
           email: user.email || '',
           fullName: data.fullName || 'Bảo TN',
-          role: data.role || 'SYSTEM_ADMIN',
+          role: data.role || 'SALES_MANAGER',
           status: data.status || 'ACTIVE',
           createdAt: data.createdAt
         };
@@ -160,10 +158,18 @@ export default function Login() {
           id: user.uid,
           email: user.email || '',
           fullName: user.email?.split('@')[0] || 'Bảo TN',
-          role: 'SYSTEM_ADMIN',
+          role: 'SALES_MANAGER',
           status: 'ACTIVE',
           createdAt: new Date().toISOString()
         };
+        await setDoc(userDocRef, {
+          id: profileData.id,
+          email: profileData.email,
+          fullName: profileData.fullName,
+          role: profileData.role,
+          status: profileData.status,
+          createdAt: serverTimestamp()
+        });
       }
       
       loginWithProfile(profileData);
@@ -171,6 +177,8 @@ export default function Login() {
       navigate('/');
     } catch (error: any) {
       console.error("Email login error:", error);
+      toast.error('Đăng nhập thất bại. Vui lòng kiểm tra email/mật khẩu hoặc đăng ký tài khoản mới.');
+      return;
       
       // Auto-register or fallback login seamlessly for baotn@vaa.edu.vn or any user email
       if (email && email.trim().length > 3) {
@@ -222,6 +230,10 @@ export default function Login() {
 
   const handleDemoLogin = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!DEMO_AUTH_ENABLED) {
+      toast.error('Demo auth is disabled in this environment.');
+      return;
+    }
     setLoadingDemo(true);
     setTimeout(() => {
       loginAsDemo(demoName || 'Khách thử nghiệm', selectedRole);

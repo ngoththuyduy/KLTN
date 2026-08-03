@@ -52,7 +52,7 @@ export default function Register() {
         id: user.uid,
         email: email,
         fullName: fullName,
-        role: selectedRole,
+        role: 'SALES_MANAGER',
         status: 'ACTIVE',
         createdAt: new Date().toISOString()
       };
@@ -62,7 +62,7 @@ export default function Register() {
         id: newProfile.id,
         email: newProfile.email,
         fullName: newProfile.fullName,
-        role: newProfile.role,
+        role: 'SALES_MANAGER',
         status: newProfile.status,
         createdAt: serverTimestamp()
       });

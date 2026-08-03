@@ -1,7 +1,12 @@
+import { authenticatedFetch } from '@/lib/api';
+
 export async function getEmbedding(text: string): Promise<number[]> {
   const sanitizedText = (text && text.trim()) ? text.trim() : "Dữ liệu trống";
   const result = await getEmbeddings([sanitizedText]);
-  return result[0] || new Array(768).fill(0);
+  if (!result[0]) {
+    throw new Error('Embedding response did not include a vector.');
+  }
+  return result[0];
 }
 
 export async function getEmbeddings(texts: string[]): Promise<number[][]> {
@@ -12,7 +17,7 @@ export async function getEmbeddings(texts: string[]): Promise<number[][]> {
   const id = setTimeout(() => controller.abort(), 15000);
   
   try {
-    const response = await fetch("/api/embeddings", {
+    const response = await authenticatedFetch("/api/embeddings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ texts: sanitizedTexts }),
@@ -29,8 +34,8 @@ export async function getEmbeddings(texts: string[]): Promise<number[][]> {
     return data.embeddings || [];
   } catch (err) {
     clearTimeout(id);
-    console.warn("Embedding fetch timed out or failed, falling back to metadata:", err);
-    return texts.map(() => new Array(768).fill(0));
+    console.warn("Embedding fetch timed out or failed:", err);
+    throw err;
   }
 }
 
@@ -44,7 +49,7 @@ export async function getEmbeddingWithRateLimit(text: string): Promise<number[]>
   const id = setTimeout(() => controller.abort(), 15000);
   
   try {
-    const response = await fetch("/api/embeddings", {
+    const response = await authenticatedFetch("/api/embeddings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ texts: [sanitizedText] }),
@@ -64,14 +69,17 @@ export async function getEmbeddingWithRateLimit(text: string): Promise<number[]>
     }
     
     const data = await response.json();
-    return data.embeddings?.[0] || new Array(768).fill(0);
+    if (!data.embeddings?.[0]) {
+      throw new Error('Embedding response did not include a vector.');
+    }
+    return data.embeddings[0];
   } catch (err: any) {
     clearTimeout(id);
     if (err.message === "RateLimitError" || err.status === 429) {
       throw err;
     }
-    console.warn("Embedding fetch timed out or failed in rate limiting endpoint, falling back to zero-filled vector:", err);
-    return new Array(768).fill(0);
+    console.warn("Embedding fetch timed out or failed in rate limiting endpoint:", err);
+    throw err;
   }
 }
 
@@ -105,7 +113,7 @@ export async function getEmbeddingsInBatches(
       const id = setTimeout(() => controller.abort(), 20000); // 20 giây timeout cho mảng lớn
 
       try {
-        const response = await fetch("/api/embeddings", {
+        const response = await authenticatedFetch("/api/embeddings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ texts: sanitizedBatch }),
@@ -142,10 +150,9 @@ export async function getEmbeddingsInBatches(
       }
     }
 
-    // Nếu đã thử hết số lần mà cụm này vẫn hỏng, nạp vector trống để không làm chết luồng
+    // If a batch still fails after all retries, stop ingestion instead of storing fake vectors.
     if (!success) {
-      console.error(`💥 Không thể lấy embedding cho cụm dòng từ ${i} đến ${i + batch.length}. Đang nạp vector dự phòng.`);
-      allEmbeddings.push(...batch.map(() => new Array(768).fill(0)));
+      throw new Error(`Could not generate embeddings for batch ${i}-${i + batch.length}`);
     }
 
     // Thông báo tiến độ ra giao diện/log nếu có

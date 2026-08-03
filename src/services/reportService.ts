@@ -3,7 +3,7 @@ import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { extractSalesRecord, ParsedSalesRow } from '@/utils/salesParser';
 import { chatWithAI } from '@/lib/gemini';
 
-export async function generateAutoReports(fileId: string, fileName: string, rows: any[]): Promise<any[]> {
+export async function generateAutoReports(fileId: string, fileName: string, rows: any[], ownerId?: string): Promise<any[]> {
   if (!rows || rows.length === 0) return [];
 
   // Parse records
@@ -88,6 +88,8 @@ ${focusInstruction}
 
       // Write direct to Firestore
       const reportRef = await addDoc(collection(db, 'reports'), {
+        ownerId: ownerId || 'shared_user',
+        createdBy: ownerId || 'shared_user',
         title: `Báo cáo ${type} Tự động - ${fileName} (${new Date().toLocaleDateString('vi-VN')})`,
         content: markdownContent,
         generatedBy: 'AI Sales Automation (LLM + RAG)',

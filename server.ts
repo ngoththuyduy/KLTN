@@ -8,6 +8,9 @@ import cron from "node-cron";
 import fs from "fs";
 import { initializeApp } from "firebase/app";
 import { initializeFirestore, collection, addDoc, getDocs, getDoc, doc, query, orderBy, limit, setDoc } from "firebase/firestore";
+import { initializeApp as initializeAdminApp, applicationDefault, cert, getApps as getAdminApps } from "firebase-admin/app";
+import { getAuth as getAdminAuth } from "firebase-admin/auth";
+import { getFirestore as getAdminFirestore } from "firebase-admin/firestore";
 import { extractSalesRecord } from "./src/utils/salesParser.ts";
 import { marked } from "marked";
 
@@ -22,7 +25,9 @@ const __dirname = path.dirname(__filename);
 
 // Explicitly load .env using absolute paths for Plesk / Phusion Passenger compatibility
 dotenv.config({ path: path.join(process.cwd(), '.env') });
+dotenv.config({ path: path.join(process.cwd(), '.env.local') });
 dotenv.config({ path: path.join(__dirname, '.env') });
+dotenv.config({ path: path.join(__dirname, '.env.local') });
 
 if (process.env.GEMINI_API_KEY) {
   console.log('[Plesk/Env] GEMINI_API_KEY successfully loaded from .env');
@@ -93,9 +98,8 @@ async function getActiveGeminiApiKey(requestKey?: string): Promise<string> {
   }
   if (firebaseDb) {
     try {
-      const configRef = doc(firebaseDb, "config", "global");
-      const configSnap = await getDoc(configRef);
-      if (configSnap.exists()) {
+      const configSnap = await firebaseDb.doc("config/global").get();
+      if (configSnap.exists) {
         const data = configSnap.data();
         if (data && data.geminiApiKey && typeof data.geminiApiKey === 'string' && data.geminiApiKey !== '****************' && data.geminiApiKey.length > 5) {
           return data.geminiApiKey.trim();
@@ -106,6 +110,35 @@ async function getActiveGeminiApiKey(requestKey?: string): Promise<string> {
     }
   }
   return "";
+}
+
+async function getGeminiApiKeyStatus(): Promise<{ configured: boolean; source: "env" | "firestore" | "missing" }> {
+  if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() && process.env.GEMINI_API_KEY !== '****************') {
+    return { configured: true, source: "env" };
+  }
+
+  if (firebaseDb) {
+    try {
+      const configSnap = await firebaseDb.doc("config/global").get();
+      if (configSnap.exists) {
+        const data = configSnap.data();
+        if (data?.geminiApiKey && typeof data.geminiApiKey === 'string' && data.geminiApiKey !== '****************' && data.geminiApiKey.length > 5) {
+          return { configured: true, source: "firestore" };
+        }
+      }
+    } catch (err) {
+      console.warn('[SmartPort AI] Could not inspect Gemini key status from Firestore config:', err);
+    }
+  }
+
+  return { configured: false, source: "missing" };
+}
+
+function createMissingGeminiApiKeyError() {
+  const err: any = new Error("GEMINI_API_KEY is missing. Set it in host environment variables, .env, .env.local, or config/global.");
+  err.code = "MissingApiKey";
+  err.status = 503;
+  return err;
 }
 
 function createGenAIClient(apiKey: string): GoogleGenAI {
@@ -134,29 +167,134 @@ export const app = express();
 // Middleware
 app.use(express.json({ limit: '50mb' }));
 
+let adminAuth: ReturnType<typeof getAdminAuth> | null = null;
+try {
+  if (getAdminApps().length === 0) {
+    const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+    if (serviceAccountJson) {
+      initializeAdminApp({
+        credential: cert(JSON.parse(serviceAccountJson))
+      });
+    } else {
+      initializeAdminApp({
+        credential: applicationDefault()
+      });
+    }
+  }
+  adminAuth = getAdminAuth();
+  firebaseDb = getAdminFirestore();
+  console.log('[Firebase Admin] Auth verifier initialized.');
+} catch (err) {
+  console.warn('[Firebase Admin] Auth verifier is not configured. Protected API routes will reject requests.', err);
+}
+
+async function getConfiguredModelName(): Promise<string> {
+  if (firebaseDb) {
+    try {
+      const snap = await firebaseDb.doc("config/global").get();
+      const modelName = snap.exists ? snap.data()?.modelName : "";
+      if (typeof modelName === "string" && modelName.trim()) {
+        return modelName.trim();
+      }
+    } catch (err) {
+      console.warn('[SmartPort AI] Could not read modelName from Firestore config:', err);
+    }
+  }
+  return "gemini-2.5-flash";
+}
+
+async function getServerUserProfile(uid: string): Promise<any | null> {
+  if (!firebaseDb) return null;
+  const snap = await firebaseDb.doc(`users/${uid}`).get();
+  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+}
+
+async function requireApiAuth(req: any, res: any, next: any) {
+  try {
+    const demoUser = req.headers['x-demo-user'];
+    if (typeof demoUser === 'string' && /^demo_[a-zA-Z0-9_-]+$/.test(demoUser)) {
+      req.auth = {
+        uid: demoUser,
+        email: 'demo.user@salesintel.internal',
+        profile: {
+          id: demoUser,
+          role: 'SALES_MANAGER',
+          status: 'ACTIVE',
+          isDemo: true
+        }
+      };
+      return next();
+    }
+
+    if (!adminAuth) {
+      return res.status(503).json({
+        error: 'AuthVerifierUnavailable',
+        message: 'Server-side Firebase auth verification is not configured.'
+      });
+    }
+
+    const header = req.headers.authorization || '';
+    const match = /^Bearer\s+(.+)$/i.exec(header);
+    if (!match) {
+      return res.status(401).json({ error: 'Unauthorized', message: 'Missing Firebase ID token.' });
+    }
+
+    const decoded = await adminAuth.verifyIdToken(match[1]);
+    const profile = await getServerUserProfile(decoded.uid);
+    if (!profile || profile.status !== 'ACTIVE') {
+      return res.status(403).json({ error: 'Forbidden', message: 'Active user profile is required.' });
+    }
+
+    req.auth = { uid: decoded.uid, email: decoded.email || '', profile };
+    next();
+  } catch (err: any) {
+    return res.status(401).json({ error: 'Unauthorized', message: err?.message || 'Invalid Firebase ID token.' });
+  }
+}
+
+function requireRole(roles: string[]) {
+  return (req: any, res: any, next: any) => {
+    const role = req.auth?.profile?.role;
+    if (!role || !roles.includes(role)) {
+      return res.status(403).json({ error: 'Forbidden', message: 'Insufficient role for this operation.' });
+    }
+    next();
+  };
+}
+
+app.use('/api', (req: any, res: any, next: any) => {
+  if (req.path === '/health') return next();
+  return requireApiAuth(req, res, next);
+});
+
 // API Routes
-app.get("/api/health", (req, res) => {
+app.get("/api/health", async (req, res) => {
+  const geminiStatus = await getGeminiApiKeyStatus();
   res.json({
     status: "ok",
     environment: process.env.NODE_ENV || "production",
     node: process.version,
-    geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() && process.env.GEMINI_API_KEY !== '****************'),
-    firebaseConfigured: Boolean(firebaseDb)
+    geminiConfigured: geminiStatus.configured,
+    geminiKeySource: geminiStatus.source,
+    firebaseConfigured: Boolean(firebaseDb),
+    authVerifierConfigured: Boolean(adminAuth)
   });
 });
 
   app.post("/api/embeddings", async (req, res) => {
     try {
-      const { texts, geminiApiKey } = req.body;
+      const { texts } = req.body;
       if (!texts || !Array.isArray(texts)) {
         return res.status(400).json({ error: "Invalid texts list" });
       }
       
-      const activeApiKey = await getActiveGeminiApiKey(geminiApiKey);
+      const activeApiKey = await getActiveGeminiApiKey();
       if (!activeApiKey) {
-        console.warn("GEMINI_API_KEY is not defined in env or config. Returning zero embeddings as fallback.");
-        const zeroEmbeddings = texts.map(() => new Array(768).fill(0));
-        return res.json({ embeddings: zeroEmbeddings });
+        console.warn("GEMINI_API_KEY is not defined in env or config. Refusing to create placeholder embeddings.");
+        return res.status(503).json({
+          error: "MissingApiKey",
+          message: "Gemini API key is required to generate embeddings."
+        });
       }
       
       const activeAi = createGenAIClient(activeApiKey);
@@ -201,9 +339,11 @@ app.get("/api/health", (req, res) => {
         const errMsg = String(lastError.message || "").toLowerCase();
         const isRateLimit = lastError?.status === 429 || errMsg.includes("429") || errMsg.includes("resource_exhausted") || errMsg.includes("quota exceeded") || errMsg.includes("rate limit");
         if (isRateLimit) {
-          console.warn("[Gemini Embed] All active models hit rate limit/quota. Returning zero embeddings gracefully.");
-          const zeroEmbeddings = texts.map(() => new Array(768).fill(0));
-          return res.json({ embeddings: zeroEmbeddings, warning: "Rate limit reached, used fallback zero-vectors" });
+          console.warn("[Gemini Embed] All active models hit rate limit/quota.");
+          return res.status(429).json({
+            error: "EmbeddingRateLimited",
+            message: "Gemini embedding rate limit or quota was reached."
+          });
         }
         throw lastError;
       }
@@ -216,16 +356,18 @@ app.get("/api/health", (req, res) => {
       }
       
       if (embeddings.length === 0 && texts.length > 0) {
-        embeddings = texts.map(() => new Array(768).fill(0));
+        return res.status(502).json({
+          error: "EmptyEmbeddingResponse",
+          message: "Gemini returned no embedding vectors."
+        });
       }
       
       res.json({ embeddings });
     } catch (error: any) {
-      console.warn("Gemini Embed Exception handled gracefully:", error?.message || error);
-      const zeroEmbeddings = (req.body?.texts || []).map(() => new Array(768).fill(0));
-      res.json({ 
-        embeddings: zeroEmbeddings, 
-        warning: "Failed to generate AI embeddings; fell back to zero vectors gracefully" 
+      console.warn("Gemini Embed Exception:", error?.message || error);
+      res.status(500).json({
+        error: "EmbeddingGenerationFailed",
+        message: error?.message || "Failed to generate AI embeddings."
       });
     }
   });
@@ -239,13 +381,14 @@ app.get("/api/health", (req, res) => {
   }) {
     const activeApiKey = await getActiveGeminiApiKey(config.customApiKey);
 
-    // Prioritize standard official Gemini models: gemini-2.5-flash, gemini-2.5-pro, gemini-1.5-flash, gemini-1.5-pro
-    const modelsToTry = [
-      "gemini-2.5-flash",
+    const configuredModel = await getConfiguredModelName();
+    const modelsToTry = Array.from(new Set([
+      configuredModel,
       "gemini-2.5-pro",
+      "gemini-2.5-flash",
       "gemini-1.5-flash",
       "gemini-1.5-pro"
-    ];
+    ]));
     let lastError: any = null;
 
     if (activeApiKey) {
@@ -341,6 +484,7 @@ app.get("/api/health", (req, res) => {
       }
     } else {
       console.warn("[SmartPort AI] GEMINI_API_KEY is not defined. Skipping live queries and routing directly to offline fallback.");
+      throw createMissingGeminiApiKeyError();
     }
 
     // High demand spikes (503 Service Unavailable) fallback logic
@@ -449,6 +593,12 @@ app.get("/api/health", (req, res) => {
       res.json({ text: response.text || "Hệ thống AI đã nhận được yêu cầu và sẵn sàng phản hồi." });
     } catch (error: any) {
       console.error("Gemini Error:", error);
+      if (error?.code === "MissingApiKey") {
+        return res.status(503).json({
+          error: "MissingApiKey",
+          message: "May chu chua doc duoc GEMINI_API_KEY. Hay cau hinh bien moi truong GEMINI_API_KEY tren host, file .env/.env.local, hoac config/global."
+        });
+      }
       res.json({ 
         text: "Chào bạn, hệ thống AI đang hỗ trợ nhiều phản hồi cùng lúc. Bạn vui lòng thử gửi lại câu hỏi hoặc làm mới trang nhé!" 
       });
@@ -471,20 +621,20 @@ app.get("/api/health", (req, res) => {
       res.json({ analysis: response.text });
     } catch (error: any) {
       console.error("Gemini Analyze Error:", error);
-      res.status(500).json({ 
-        error: "Failed to analyze data", 
-        message: error?.message || "Internal AI Server Error" 
+      res.status(error?.code === "MissingApiKey" ? 503 : 500).json({ 
+        error: error?.code === "MissingApiKey" ? "MissingApiKey" : "Failed to analyze data", 
+        message: error?.code === "MissingApiKey" ? "May chu chua doc duoc GEMINI_API_KEY." : (error?.message || "Internal AI Server Error") 
       });
     }
   });
 
   app.post("/api/data-quality-check", async (req, res) => {
     try {
-      const { columns, sampleRows, fileStats, fileName, geminiApiKey } = req.body;
-      const activeApiKey = await getActiveGeminiApiKey(geminiApiKey);
+      const { columns, sampleRows, fileStats, fileName } = req.body;
+      const activeApiKey = await getActiveGeminiApiKey();
 
       if (!activeApiKey) {
-        return res.status(400).json({
+        return res.status(503).json({
           error: "MissingApiKey",
           message: "Vui lòng cung cấp khóa Google Gemini API Key trong menu Cấu hình hoặc biến môi trường."
         });
@@ -547,7 +697,7 @@ app.get("/api/health", (req, res) => {
 
   app.post("/api/generate-auto-dashboard", async (req, res) => {
     try {
-      const { columns, sampleData, fileName, customPrompt, geminiApiKey } = req.body;
+      const { columns, sampleData, fileName, customPrompt } = req.body;
       if (!columns || !Array.isArray(columns) || columns.length === 0) {
         return res.status(400).json({ error: "No columns found in the uploaded file" });
       }
@@ -619,7 +769,7 @@ Do not use mock values in insights; instead, write analytical guidelines advisin
       `;
 
       let parsedSpec: any = null;
-      const activeApiKey = await getActiveGeminiApiKey(geminiApiKey);
+      const activeApiKey = await getActiveGeminiApiKey();
       
       const generateWithRetry = async (maxRetries = 3, delayMs = 1500) => {
         if (!activeApiKey) return null;
@@ -895,7 +1045,7 @@ Do not use mock values in insights; instead, write analytical guidelines advisin
   });
 
   // Gửi Email Báo cáo qua SMTP (Cấu hình tự động hoặc từ client gửi lên)
-  app.post("/api/send-email", async (req, res) => {
+  app.post("/api/send-email", requireRole(['SYSTEM_ADMIN', 'SALES_MANAGER']), async (req, res) => {
     try {
       const { to, subject, html, attachment, attachmentName, smtpConfig } = req.body;
       
@@ -973,7 +1123,7 @@ Do not use mock values in insights; instead, write analytical guidelines advisin
             pass
           },
           tls: {
-            rejectUnauthorized: false // Cho phép kết nối linh hoạt không bị chặn bởi certs lỗi thời
+            rejectUnauthorized: process.env.SMTP_ALLOW_INSECURE_TLS === "true" ? false : true
           }
         });
       }
@@ -1080,9 +1230,8 @@ Do not use mock values in insights; instead, write analytical guidelines advisin
       let smtpConfig: any = null;
 
       try {
-        const configRef = doc(firebaseDb, "config", "global");
-        const configSnap = await getDoc(configRef);
-        if (configSnap.exists()) {
+        const configSnap = await firebaseDb.doc("config/global").get();
+        if (configSnap.exists) {
           const data = configSnap.data();
           schedulerTime = data.schedulerTime || "08:00";
           autoSendEmail = data.autoSendEmail !== undefined ? data.autoSendEmail : true;
@@ -1098,9 +1247,7 @@ Do not use mock values in insights; instead, write analytical guidelines advisin
 
       // 2. Fetch completed files and extract data
       console.log("[Scheduler] Querying completed sales files in Firestore...");
-      const filesSnap = await getDocs(
-        query(collection(firebaseDb, "files"), orderBy("uploadDate", "desc"), limit(5))
-      );
+      const filesSnap = await firebaseDb.collection("files").orderBy("uploadDate", "desc").limit(5).get();
 
       const completedFiles = filesSnap.docs
         .map((d) => ({ id: d.id, ...(d.data() as any) }))
@@ -1118,9 +1265,7 @@ Do not use mock values in insights; instead, write analytical guidelines advisin
 
           if (fileRecords.length === 0) {
             try {
-              const recSnap = await getDocs(
-                query(collection(firebaseDb, `files/${fileDoc.id}/records`), limit(60))
-              );
+              const recSnap = await firebaseDb.collection(`files/${fileDoc.id}/records`).limit(60).get();
               fileRecords = recSnap.docs.map((d: any) => d.data());
             } catch (err) {
               console.warn(`[Scheduler] Could not retrieve subrecords for file ${fileDoc.id}:`, err);
@@ -1185,7 +1330,9 @@ Quy tắc cấu trúc:
 
       // 4. Save report into reports collection in Firestore
       console.log("[Scheduler] Saving generated report into Firestore reports collection...");
-      const docRef = await addDoc(collection(firebaseDb, "reports"), {
+      const docRef = await firebaseDb.collection("reports").add({
+        ownerId: "scheduler",
+        createdBy: "scheduler",
         title,
         content,
         generatedBy: "Hệ thống Lịch Trình Tự động",
@@ -1223,7 +1370,7 @@ Quy tắc cấu trúc:
             port,
             secure,
             auth: { user, pass },
-            tls: { rejectUnauthorized: false }
+            tls: { rejectUnauthorized: process.env.SMTP_ALLOW_INSECURE_TLS === "true" ? false : true }
           });
         }
 
@@ -1337,14 +1484,13 @@ Quy tắc cấu trúc:
   }
 
   // API Endpoint to fetch global config safely
-  app.get("/api/config", async (req, res) => {
+  app.get("/api/config", requireRole(['SYSTEM_ADMIN']), async (req, res) => {
     try {
       if (!firebaseDb) {
         return res.status(500).json({ error: "FirebaseNotInitialized", message: "Firestore is not initialized on the server." });
       }
-      const configRef = doc(firebaseDb, "config", "global");
-      const configSnap = await getDoc(configRef);
-      if (configSnap.exists()) {
+      const configSnap = await firebaseDb.doc("config/global").get();
+      if (configSnap.exists) {
         res.json(configSnap.data());
       } else {
         res.status(404).json({ error: "ConfigNotFound", message: "Global config not found." });
@@ -1356,14 +1502,13 @@ Quy tắc cấu trúc:
   });
 
   // API Endpoint to save global config safely
-  app.post("/api/config", async (req, res) => {
+  app.post("/api/config", requireRole(['SYSTEM_ADMIN']), async (req, res) => {
     try {
       if (!firebaseDb) {
         return res.status(500).json({ error: "FirebaseNotInitialized", message: "Firestore is not initialized on the server." });
       }
       const newConfig = req.body;
-      const configRef = doc(firebaseDb, "config", "global");
-      await setDoc(configRef, newConfig, { merge: true });
+      await firebaseDb.doc("config/global").set(newConfig, { merge: true });
       res.json({ success: true, message: "Global config updated successfully." });
     } catch (err: any) {
       console.error("[API] Failed to update global config:", err);
@@ -1372,7 +1517,7 @@ Quy tắc cấu trúc:
   });
 
   // API Endpoint to manually trigger report generation and email sending for immediate testing
-  app.post("/api/trigger-daily-scheduler", async (req, res) => {
+  app.post("/api/trigger-daily-scheduler", requireRole(['SYSTEM_ADMIN']), async (req, res) => {
     try {
       console.log("[API] Manual trigger of daily report generation requested.");
       const result = await generateAndSendDailyReport();
@@ -1400,11 +1545,11 @@ Quy tắc cấu trúc:
       const { timeStr, dateStr } = getICTDateTime();
 
       // Fetch target schedulerTime and last run status from Firestore
-      const configRef = doc(firebaseDb, "config", "global");
-      const configSnap = await getDoc(configRef);
+      const configRef = firebaseDb.doc("config/global");
+      const configSnap = await configRef.get();
 
       let data: any = {};
-      if (configSnap.exists()) {
+      if (configSnap.exists) {
         data = configSnap.data();
       }
 
@@ -1418,7 +1563,7 @@ Quy tắc cấu trúc:
         console.log(`[Scheduler] Daily cron triggered! Current ICT time: ${timeStr}, Target: ${targetTime}, Date: ${dateStr}, Last Run Date: ${lastRunDate}`);
 
         // Persist lastRunDate immediately to prevent concurrent triggers
-        await setDoc(configRef, {
+        await configRef.set({
           lastRunDate: dateStr,
           lastRunTime: new Date().toISOString(),
           lastRunStatus: "RUNNING"
@@ -1426,7 +1571,7 @@ Quy tắc cấu trúc:
 
         const result = await generateAndSendDailyReport();
 
-        await setDoc(configRef, {
+        await configRef.set({
           lastRunStatus: "SUCCESS",
           lastRunResult: result || null
         }, { merge: true });

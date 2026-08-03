@@ -3,9 +3,36 @@ import { doc, setDoc } from 'firebase/firestore';
 
 const REPORTS_STORAGE_KEY = 'sales_intel_reports';
 
+function getActiveDemoId(): string | null {
+  try {
+    const activeUser = JSON.parse(sessionStorage.getItem('sales_intel_active_demo_user') || 'null');
+    if (activeUser?.id && String(activeUser.id).startsWith('demo_')) {
+      return activeUser.id;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function scopedKey(key: string): string {
+  const demoId = getActiveDemoId();
+  if (demoId) {
+    return `${key}_${demoId}`;
+  }
+  return key;
+}
+
+function scopedStorage(): Storage {
+  if (getActiveDemoId()) {
+    return sessionStorage;
+  }
+  return localStorage;
+}
+
 export function getLocalReports(): Report[] {
   try {
-    const raw = localStorage.getItem(REPORTS_STORAGE_KEY);
+    const raw = scopedStorage().getItem(scopedKey(REPORTS_STORAGE_KEY));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -24,7 +51,7 @@ export function saveLocalReport(report: Report): void {
     } else {
       current.unshift(report);
     }
-    localStorage.setItem(REPORTS_STORAGE_KEY, JSON.stringify(current));
+    scopedStorage().setItem(scopedKey(REPORTS_STORAGE_KEY), JSON.stringify(current));
   } catch (err) {
     console.warn("Could not save local report:", err);
   }
@@ -61,13 +88,18 @@ export function mergeReports(firestoreReports: Report[], localReports: Report[] 
   return list;
 }
 
-export async function syncLocalReportsToFirestore(db: any): Promise<void> {
+export async function syncLocalReportsToFirestore(db: any, ownerId?: string): Promise<void> {
   try {
+    if (getActiveDemoId() || ownerId?.startsWith('demo_')) {
+      return;
+    }
     const local = getLocalReports();
     for (const report of local) {
       if (!report.id) continue;
       try {
         await setDoc(doc(db, 'reports', report.id), {
+          ownerId: ownerId || (report as any).ownerId || 'shared_user',
+          createdBy: ownerId || (report as any).createdBy || 'shared_user',
           title: report.title || 'Báo cáo',
           content: report.content || '',
           generatedBy: report.generatedBy || 'AI System',

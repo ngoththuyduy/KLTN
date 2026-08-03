@@ -34,6 +34,7 @@ import { Badge } from '@/components/ui/badge';
 import { doc, getDoc, setDoc, updateDoc, collection, onSnapshot, query, orderBy } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '@/lib/firebase';
 import { useAuth } from '@/lib/AuthContext';
+import { authenticatedFetch } from '@/lib/api';
 import { toast } from 'sonner';
 import { UserProfile, UserRole } from '@/types';
 
@@ -55,7 +56,7 @@ export default function Settings() {
     const fetchConfig = async () => {
       const localKey = localStorage.getItem('gemini_custom_api_key');
       try {
-        const res = await fetch('/api/config');
+        const res = await authenticatedFetch('/api/config');
         if (res.ok) {
           const loadedData = await res.json();
           setConfig({
@@ -105,7 +106,7 @@ export default function Settings() {
       if (config.geminiApiKey && config.geminiApiKey !== '****************' && config.geminiApiKey.length > 5) {
         localStorage.setItem('gemini_custom_api_key', config.geminiApiKey.trim());
       }
-      const res = await fetch('/api/config', {
+      const res = await authenticatedFetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)
@@ -311,7 +312,7 @@ export default function Settings() {
                         }
                         const toastId = toast.loading("Đang lưu cài đặt & chạy tiến trình tạo báo cáo...");
                         try {
-                          const saveRes = await fetch('/api/config', {
+                          const saveRes = await authenticatedFetch('/api/config', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify(config)
@@ -321,7 +322,7 @@ export default function Settings() {
                             throw new Error(errData.message || "Lỗi lưu cấu hình");
                           }
                           
-                          const res = await fetch("/api/trigger-daily-scheduler", {
+                          const res = await authenticatedFetch("/api/trigger-daily-scheduler", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" }
                           });

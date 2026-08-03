@@ -9,7 +9,8 @@ const chunksMemoryCache = new Map<string, KnowledgeChunk[]>();
 export async function searchChunks(
   queryVector: number[],
   topK = 5,
-  sourceFiles?: string[]
+  sourceFiles?: string[],
+  ownerId?: string
 ): Promise<{ chunk: KnowledgeChunk; score: number }[]> {
   if (!queryVector || queryVector.length === 0) {
     return [];
@@ -33,7 +34,9 @@ export async function searchChunks(
         const maxBatchSize = 10;
         for (let i = 0; i < filesToFetch.length; i += maxBatchSize) {
           const batch = filesToFetch.slice(i, i + maxBatchSize);
-          const q = query(chunksCollection, where('sourceFileId', 'in', batch));
+          const q = ownerId
+            ? query(chunksCollection, where('ownerId', '==', ownerId), where('sourceFileId', 'in', batch))
+            : query(chunksCollection, where('sourceFileId', 'in', batch));
           const bSnap = await getDocs(q);
           
           const batchMap = new Map<string, KnowledgeChunk[]>();
@@ -60,7 +63,9 @@ export async function searchChunks(
       }
     } else {
       // Query all chunks
-      const q = query(chunksCollection);
+      const q = ownerId
+        ? query(chunksCollection, where('ownerId', '==', ownerId))
+        : query(chunksCollection);
       const snapshot = await getDocs(q);
       snapshot.docs.forEach((docSnap: any) => {
         const data = docSnap.data();

@@ -4,6 +4,37 @@ import { doc, setDoc, writeBatch } from 'firebase/firestore';
 const STORAGE_KEY = 'sales_intel_uploaded_files';
 const RECORDS_PREFIX = 'sales_intel_records_';
 
+function getActiveDemoId(): string | null {
+  try {
+    const activeUser = JSON.parse(sessionStorage.getItem('sales_intel_active_demo_user') || 'null');
+    if (activeUser?.id && String(activeUser.id).startsWith('demo_')) {
+      return activeUser.id;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function scopedKey(key: string): string {
+  const demoId = getActiveDemoId();
+  if (demoId) {
+    return `${key}_${demoId}`;
+  }
+  return key;
+}
+
+function scopedStorage(): Storage {
+  if (getActiveDemoId()) {
+    return sessionStorage;
+  }
+  return localStorage;
+}
+
+function scopedRecordsKey(fileId: string): string {
+  return scopedKey(`${RECORDS_PREFIX}${fileId}`);
+}
+
 export function sanitizeForFirestore(val: any): any {
   if (val === undefined || val === null) return null;
   if (typeof val === 'number') {
@@ -113,7 +144,7 @@ export const DEFAULT_SAMPLE_IDS = ['standard_default_sample_file', 'default_sale
 
 export function getDeletedFileIds(): string[] {
   try {
-    const raw = localStorage.getItem(DELETED_FILES_KEY);
+    const raw = scopedStorage().getItem(scopedKey(DELETED_FILES_KEY));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -127,7 +158,7 @@ export function markFileAsDeleted(fileId: string): void {
     const deleted = getDeletedFileIds();
     if (!deleted.includes(fileId)) {
       deleted.push(fileId);
-      localStorage.setItem(DELETED_FILES_KEY, JSON.stringify(deleted));
+      scopedStorage().setItem(scopedKey(DELETED_FILES_KEY), JSON.stringify(deleted));
     }
   } catch (err) {
     console.warn("Could not mark file as deleted:", err);
@@ -136,7 +167,7 @@ export function markFileAsDeleted(fileId: string): void {
 
 export function getLocalFiles(): SalesFile[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = scopedStorage().getItem(scopedKey(STORAGE_KEY));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     const deleted = new Set(getDeletedFileIds());
@@ -151,7 +182,7 @@ export function saveLocalFile(file: SalesFile): void {
   try {
     // Unmark as deleted if it was previously marked
     const deleted = getDeletedFileIds().filter(id => id !== file.id);
-    localStorage.setItem(DELETED_FILES_KEY, JSON.stringify(deleted));
+    scopedStorage().setItem(scopedKey(DELETED_FILES_KEY), JSON.stringify(deleted));
 
     const current = getLocalFiles();
     const idx = current.findIndex(f => f.id === file.id);
@@ -160,7 +191,7 @@ export function saveLocalFile(file: SalesFile): void {
     } else {
       current.unshift(file);
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
+    scopedStorage().setItem(scopedKey(STORAGE_KEY), JSON.stringify(current));
   } catch (err) {
     console.warn("Could not save local file to localStorage:", err);
   }
@@ -168,8 +199,7 @@ export function saveLocalFile(file: SalesFile): void {
 
 export function saveLocalFileRecords(fileId: string, records: any[]): void {
   try {
-    const key = `${RECORDS_PREFIX}${fileId}`;
-    localStorage.setItem(key, JSON.stringify(records.slice(0, 5000)));
+    scopedStorage().setItem(scopedRecordsKey(fileId), JSON.stringify(records.slice(0, 5000)));
   } catch (err) {
     console.warn("Could not save full records to localStorage quota:", err);
   }
@@ -180,8 +210,7 @@ export function getLocalFileRecords(fileId: string): any[] {
     return SAMPLE_5000_RECORDS;
   }
   try {
-    const key = `${RECORDS_PREFIX}${fileId}`;
-    const raw = localStorage.getItem(key);
+    const raw = scopedStorage().getItem(scopedRecordsKey(fileId));
     if (!raw) return [];
     return JSON.parse(raw);
   } catch (err) {
@@ -194,8 +223,8 @@ export function deleteLocalFile(fileId: string): void {
   try {
     markFileAsDeleted(fileId);
     const current = getLocalFiles().filter(f => f.id !== fileId);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
-    localStorage.removeItem(`${RECORDS_PREFIX}${fileId}`);
+    scopedStorage().setItem(scopedKey(STORAGE_KEY), JSON.stringify(current));
+    scopedStorage().removeItem(scopedRecordsKey(fileId));
   } catch (err) {
     console.warn("Could not delete local file from localStorage:", err);
   }
@@ -206,7 +235,7 @@ export function clearAllLocalFiles(): void {
     const existing = getLocalFiles();
     existing.forEach(f => markFileAsDeleted(f.id));
     DEFAULT_SAMPLE_IDS.forEach(id => markFileAsDeleted(id));
-    localStorage.removeItem(STORAGE_KEY);
+    scopedStorage().removeItem(scopedKey(STORAGE_KEY));
   } catch (err) {
     console.warn("Could not clear local files:", err);
   }
@@ -215,6 +244,7 @@ export function clearAllLocalFiles(): void {
 export function mergeFiles(firestoreFiles: SalesFile[], localFiles: SalesFile[] = getLocalFiles()): SalesFile[] {
   const map = new Map<string, SalesFile>();
   const deletedIds = new Set(getDeletedFileIds());
+  const includeDefaultSample = !getActiveDemoId();
 
   // Check if any sample ID was deleted or if real files exist
   const sampleDeleted = DEFAULT_SAMPLE_IDS.some(id => deletedIds.has(id));
@@ -222,7 +252,7 @@ export function mergeFiles(firestoreFiles: SalesFile[], localFiles: SalesFile[] 
   const validFirestoreFiles = firestoreFiles.filter(ff => !deletedIds.has(ff.id) && !DEFAULT_SAMPLE_IDS.includes(ff.id));
 
   // Add default file ONLY if no real files exist anywhere AND sample file wasn't deleted
-  if (!sampleDeleted && validLocalFiles.length === 0 && validFirestoreFiles.length === 0) {
+  if (includeDefaultSample && !sampleDeleted && validLocalFiles.length === 0 && validFirestoreFiles.length === 0) {
     map.set(DEFAULT_STANDARD_FILE.id, DEFAULT_STANDARD_FILE);
   }
 
@@ -259,8 +289,11 @@ export function mergeFiles(firestoreFiles: SalesFile[], localFiles: SalesFile[] 
   return result;
 }
 
-export async function syncLocalFilesToFirestore(db: any): Promise<void> {
+export async function syncLocalFilesToFirestore(db: any, ownerId?: string): Promise<void> {
   try {
+    if (getActiveDemoId() || ownerId?.startsWith('demo_')) {
+      return;
+    }
     const deletedIds = new Set(getDeletedFileIds());
     const localFiles = getLocalFiles().filter(f => !deletedIds.has(f.id));
     const realLocalFiles = localFiles.filter(f => !DEFAULT_SAMPLE_IDS.includes(f.id));
@@ -275,6 +308,8 @@ export async function syncLocalFilesToFirestore(db: any): Promise<void> {
         const sampleRowsToUse = (records && records.length > 0 ? records : file.sampleRows || []).slice(0, 30);
 
         const docPayload = sanitizeForFirestore({
+          ownerId: ownerId || (file as any).ownerId || 'shared_user',
+          createdBy: ownerId || (file as any).createdBy || 'shared_user',
           fileName: file.fileName,
           uploadDate: file.uploadDate || new Date().toISOString(),
           uploadedBy: file.uploadedBy || 'Hệ thống',

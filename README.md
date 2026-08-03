@@ -15,6 +15,19 @@ View your app in AI Studio: https://ai.studio/apps/7c538a8a-5a0c-416e-bebd-c847b
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set the `GEMINI_API_KEY` in [.env](.env) or [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## Deploy note
+
+On hosting/Plesk/Passenger, configure `GEMINI_API_KEY` as a server environment variable, or upload a server-readable `.env` / `.env.local` next to `app.js`.
+
+After deploy, open `/api/health` and check:
+
+- `geminiConfigured: true`
+- `geminiKeySource: "env"` or `"firestore"`
+- `authVerifierConfigured: true`
+
+If `geminiConfigured` is `false`, AI routes will return `MissingApiKey` until the server can read the key.
+If `authVerifierConfigured` is `false`, protected `/api/*` routes cannot verify real Firebase users; configure `FIREBASE_SERVICE_ACCOUNT_JSON` on the host.

@@ -386,7 +386,7 @@ ${productText ? `[DOANH THU & LỢI NHUẬN TRUNG BÌNH THEO SẢN PHẨM / TÊN
 5. Tuyệt đối KHÔNG tự tính toán hay cộng nhẩm từ các dòng mẫu vector context vì vector context chỉ là mẫu đại diện!`;
 }
 
-export async function ingestUploadedFile(fileId: string, fileName: string, rows: any[]) {
+export async function ingestUploadedFile(fileId: string, fileName: string, rows: any[], ownerId?: string) {
   if (!rows || rows.length === 0) return;
 
   const chunks: string[] = [];
@@ -435,16 +435,22 @@ Mô hình AI khi nhận câu hỏi liên quan đến bất kỳ cột nào ở t
     try {
       embeddings = await getEmbeddings(chunks);
     } catch (fallbackErr) {
-      console.error("All embedding attempts failed. Falling back to metadata zeros gracefully:", fallbackErr);
-      embeddings = chunks.map(() => new Array(768).fill(0));
+      console.error("All embedding attempts failed. Marking ingestion as failed:", fallbackErr);
+      await updateDoc(doc(db, 'files', fileId), {
+        embeddingStatus: 'FAILED',
+        lastError: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+      }).catch(() => {});
+      throw fallbackErr;
     }
   }
 
   if (embeddings.length < chunks.length) {
-    const diff = chunks.length - embeddings.length;
-    for (let d = 0; d < diff; d++) {
-      embeddings.push(new Array(768).fill(0));
-    }
+    const message = `Embedding count mismatch: expected ${chunks.length}, got ${embeddings.length}`;
+    await updateDoc(doc(db, 'files', fileId), {
+      embeddingStatus: 'FAILED',
+      lastError: message
+    }).catch(() => {});
+    throw new Error(message);
   }
 
   console.log(`[SmartHub RAG] Completed embedding generation. Committing ${chunks.length} chunks...`);
@@ -456,10 +462,15 @@ Mô hình AI khi nhận câu hỏi liên quan đến bất kỳ cột nào ở t
     chunkSlice.forEach((chunkText, index) => {
       const globalIndex = b + index;
       const chunkRef = doc(collection(db, 'knowledge_chunks'));
-      const embedding = embeddings[globalIndex] || new Array(768).fill(0);
+      const embedding = embeddings[globalIndex];
+      if (!embedding) {
+        throw new Error(`Missing embedding for chunk ${globalIndex}`);
+      }
 
       batch.set(chunkRef, {
         id: chunkRef.id,
+        ownerId: ownerId || 'shared_user',
+        createdBy: ownerId || 'shared_user',
         sourceFileId: fileId,
         sourceFile: fileName,
         text: chunkText,
@@ -559,7 +570,8 @@ export async function queryRAG(
   sourceFiles?: string[],
   history: any[] = [],
   topK = 10,
-  threshold = 0.35
+  threshold = 0.35,
+  ownerId?: string
 ): Promise<RAGResponse> {
   // If no source files are selected, or there are no documents chosen, allow conversational assistant support
   if (!sourceFiles || sourceFiles.length === 0) {
@@ -592,7 +604,9 @@ Hướng dẫn họ cách sử dụng: "Để tối ưu phân tích dữ liệu 
 
   if (activeFileIds.length === 0) {
     try {
-      const allCompletedFilesSnap = await getDocs(query(collection(db, 'files'), where('status', '==', 'COMPLETED')));
+      const allCompletedFilesSnap = ownerId
+        ? await getDocs(query(collection(db, 'files'), where('ownerId', '==', ownerId), where('status', '==', 'COMPLETED')))
+        : await getDocs(query(collection(db, 'files'), where('status', '==', 'COMPLETED')));
       activeFileIds = allCompletedFilesSnap.docs.map(d => d.id);
     } catch (err) {
       console.warn("Could not auto-fetch completed files for summary:", err);
@@ -725,7 +739,7 @@ Hướng dẫn họ cách sử dụng: "Để tối ưu phân tích dữ liệu 
   }
   
   // 2. Perform cosine similarity vector search over Firestore knowledge chunks
-  const searchResults = await searchChunks(queryVector, topK, sourceFiles);
+  const searchResults = await searchChunks(queryVector, topK, sourceFiles, ownerId);
   
   // 3. Use similarity scoring thresholds to prevent hallucinations
   let filteredResults = searchResults.filter(r => r.score >= threshold);
@@ -745,12 +759,16 @@ Hướng dẫn họ cách sử dụng: "Để tối ưu phân tích dữ liệu 
         const allDocs: any[] = [];
         for (let i = 0; i < sourceFiles.length; i += maxBatchSize) {
           const batchFiles = sourceFiles.slice(i, i + maxBatchSize);
-          const snap = await getDocs(query(chunksCollection, where('sourceFileId', 'in', batchFiles)));
+          const snap = ownerId
+            ? await getDocs(query(chunksCollection, where('ownerId', '==', ownerId), where('sourceFileId', 'in', batchFiles)))
+            : await getDocs(query(chunksCollection, where('sourceFileId', 'in', batchFiles)));
           snap.docs.forEach(d => allDocs.push(d));
         }
         snapshot = { docs: allDocs };
       } else {
-        snapshot = await getDocs(query(chunksCollection));
+        snapshot = ownerId
+          ? await getDocs(query(chunksCollection, where('ownerId', '==', ownerId)))
+          : await getDocs(query(chunksCollection));
       }
 
       snapshot.docs.forEach((doc: any) => {
@@ -793,12 +811,16 @@ Hướng dẫn họ cách sử dụng: "Để tối ưu phân tích dữ liệu 
         }
         const allDocs: any[] = [];
         for (const batch of batches) {
-          snapshot = await getDocs(query(chunksCollection, where('sourceFileId', 'in', batch)));
+          snapshot = ownerId
+            ? await getDocs(query(chunksCollection, where('ownerId', '==', ownerId), where('sourceFileId', 'in', batch)))
+            : await getDocs(query(chunksCollection, where('sourceFileId', 'in', batch)));
           snapshot.docs.forEach(d => allDocs.push(d));
         }
         snapshot = { docs: allDocs };
       } else {
-        snapshot = await getDocs(query(chunksCollection));
+        snapshot = ownerId
+          ? await getDocs(query(chunksCollection, where('ownerId', '==', ownerId)))
+          : await getDocs(query(chunksCollection));
       }
 
       // Convert user question to split keywords

@@ -66,6 +66,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import rehypeKatex from 'rehype-katex';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
@@ -103,17 +104,26 @@ export default function Chat() {
   const [editingTitle, setEditingTitle] = useState<string>('');
   
   const scrollRef = useRef<HTMLDivElement>(null);
+  const activeUserId = profile?.id || user?.uid;
+  const isDemoSession = Boolean(activeUserId?.startsWith('demo_'));
 
   useEffect(() => {
+    if (!activeUserId) return;
+
+    if (isDemoSession) {
+      setSessions(mergeSessions([], getLocalSessions()));
+      return;
+    }
+
     // 1. Sync local sessions & files to Firestore in background
     syncLocalSessionsToFirestore(db).catch(err => console.warn("Sync sessions error:", err));
-    syncLocalFilesToFirestore(db).catch(err => console.warn("Sync files error:", err));
+    syncLocalFilesToFirestore(db, activeUserId).catch(err => console.warn("Sync files error:", err));
 
     // 2. Load local sessions instantly so UI renders without delay
     setSessions(mergeSessions([], getLocalSessions()));
 
     // 3. Listen to Firestore chat_sessions globally
-    const primaryQuery = query(collection(db, 'chat_sessions'));
+    const primaryQuery = query(collection(db, 'chat_sessions'), where('userId', '==', activeUserId));
 
     const unsubscribe = onSnapshot(primaryQuery, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ChatSession));
@@ -124,10 +134,26 @@ export default function Chat() {
       setSessions(mergeSessions([], getLocalSessions()));
     });
     return unsubscribe;
-  }, []);
+  }, [activeUserId, isDemoSession]);
 
   useEffect(() => {
-    const q = query(collection(db, 'files'));
+    if (!activeUserId) return;
+
+    if (isDemoSession) {
+      const localMerged = mergeFiles([], getLocalFiles());
+      setFiles(localMerged);
+      setSelectedFiles(prev => {
+        const fileIds = localMerged.map(f => f.id);
+        const valid = prev.filter(id => fileIds.includes(id));
+        if (valid.length === 0 && localMerged.length > 0) {
+          return fileIds;
+        }
+        return valid;
+      });
+      return;
+    }
+
+    const q = query(collection(db, 'files'), where('ownerId', '==', activeUserId));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const loadedFiles = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as SalesFile));
       const merged = mergeFiles(loadedFiles, getLocalFiles());
@@ -156,7 +182,7 @@ export default function Chat() {
       });
     });
     return unsubscribe;
-  }, []);
+  }, [activeUserId, isDemoSession]);
 
   useEffect(() => {
     if (!currentSession) {
@@ -167,6 +193,10 @@ export default function Chat() {
     // Load local messages instantly first
     const initialLocalMsgs = getLocalMessages(currentSession.id);
     setMessages(initialLocalMsgs);
+
+    if (isDemoSession) {
+      return;
+    }
 
     const q = collection(db, `chat_sessions/${currentSession.id}/messages`);
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -195,7 +225,7 @@ export default function Chat() {
       setMessages(getLocalMessages(currentSession.id));
     });
     return unsubscribe;
-  }, [currentSession]);
+  }, [currentSession, isDemoSession]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -236,15 +266,19 @@ export default function Chat() {
     setSessions(prev => mergeSessions([], [newSessionObj, ...prev]));
     setCurrentSession(newSessionObj);
 
-    try {
-      await setDoc(doc(db, 'chat_sessions', newSessionId), {
-        userId: activeUserId,
-        title: newSessionObj.title,
-        lastUpdated: new Date().toISOString(),
-        sourceFiles: newSessionObj.sourceFiles
-      });
-    } catch (err) {
-      console.warn("Firestore save session notice (retained locally):", err);
+    if (!isDemoSession) {
+      try {
+        await setDoc(doc(db, 'chat_sessions', newSessionId), {
+          userId: activeUserId,
+          ownerId: activeUserId,
+          createdBy: activeUserId,
+          title: newSessionObj.title,
+          lastUpdated: new Date().toISOString(),
+          sourceFiles: newSessionObj.sourceFiles
+        });
+      } catch (err) {
+        console.warn("Firestore save session notice (retained locally):", err);
+      }
     }
 
     if (initialQuery) {
@@ -267,14 +301,14 @@ export default function Chat() {
       setMessages(prev => [...prev, userMsgObj]);
 
       const msgPath = `chat_sessions/${session.id}/messages`;
-      setDoc(doc(db, msgPath, userMsgId), {
+      if (!isDemoSession) setDoc(doc(db, msgPath, userMsgId), {
         sessionId: session.id,
         role: 'user',
         content: text,
         timestamp: new Date().toISOString()
       }).catch(err => console.warn("Firestore write notice:", err));
 
-      const result = await queryRAG(text, selectedFiles, [], topK, threshold);
+      const result = await queryRAG(text, selectedFiles, [], topK, threshold, profile?.id || user?.uid);
 
       setLastRagDetails({
         queryText: text,
@@ -296,7 +330,7 @@ export default function Chat() {
       saveLocalMessage(session.id, aiMsgObj);
       setMessages(prev => [...prev, aiMsgObj]);
 
-      setDoc(doc(db, msgPath, aiMsgId), {
+      if (!isDemoSession) setDoc(doc(db, msgPath, aiMsgId), {
         sessionId: session.id,
         role: 'assistant',
         content: result.answer,
@@ -314,8 +348,10 @@ export default function Chat() {
       setCurrentSession(updatedSessObj);
       setSessions(prev => mergeSessions([], [updatedSessObj, ...prev]));
 
-      setDoc(doc(db, 'chat_sessions', session.id), {
+      if (!isDemoSession) setDoc(doc(db, 'chat_sessions', session.id), {
         userId: updatedSessObj.userId || 'shared_user',
+        ownerId: updatedSessObj.userId || profile?.id || user?.uid,
+        createdBy: updatedSessObj.userId || profile?.id || user?.uid,
         title: autoTitle,
         lastUpdated: nowIso,
         sourceFiles: updatedSessObj.sourceFiles || []
@@ -352,7 +388,7 @@ export default function Chat() {
       setMessages(prev => [...prev, userMsgObj]);
 
       const msgPath = `chat_sessions/${currentSession.id}/messages`;
-      setDoc(doc(db, msgPath, userMsgId), {
+      if (!isDemoSession) setDoc(doc(db, msgPath, userMsgId), {
         sessionId: currentSession.id,
         role: 'user',
         content: userText,
@@ -364,7 +400,7 @@ export default function Chat() {
         parts: [{ text: m.content }]
       }));
 
-      const result = await queryRAG(userText, selectedFiles, history, topK, threshold);
+      const result = await queryRAG(userText, selectedFiles, history, topK, threshold, profile?.id || user?.uid);
 
       setLastRagDetails({
         queryText: userText,
@@ -386,7 +422,7 @@ export default function Chat() {
       saveLocalMessage(currentSession.id, aiMsgObj);
       setMessages(prev => [...prev, aiMsgObj]);
 
-      setDoc(doc(db, msgPath, aiMsgId), {
+      if (!isDemoSession) setDoc(doc(db, msgPath, aiMsgId), {
         sessionId: currentSession.id,
         role: 'assistant',
         content: result.answer,
@@ -404,8 +440,10 @@ export default function Chat() {
       setCurrentSession(updatedSessObj);
       setSessions(prev => mergeSessions([], [updatedSessObj, ...prev]));
 
-      setDoc(doc(db, 'chat_sessions', currentSession.id), {
+      if (!isDemoSession) setDoc(doc(db, 'chat_sessions', currentSession.id), {
         userId: updatedSessObj.userId || 'shared_user',
+        ownerId: updatedSessObj.userId || profile?.id || user?.uid,
+        createdBy: updatedSessObj.userId || profile?.id || user?.uid,
         title: autoTitle,
         lastUpdated: nowIso,
         sourceFiles: updatedSessObj.sourceFiles || []
@@ -437,13 +475,15 @@ export default function Chat() {
       setCurrentSession(updatedSessionObj);
       setSessions(prev => prev.map(s => s.id === currentSession.id ? updatedSessionObj : s));
 
-      try {
-        await setDoc(doc(db, 'chat_sessions', currentSession.id), {
-          sourceFiles: updated,
-          lastUpdated: nowIso
-        }, { merge: true });
-      } catch (err) {
-        console.warn("Notice updating session sourceFiles in Firestore:", err);
+      if (!isDemoSession) {
+        try {
+          await setDoc(doc(db, 'chat_sessions', currentSession.id), {
+            sourceFiles: updated,
+            lastUpdated: nowIso
+          }, { merge: true });
+        } catch (err) {
+          console.warn("Notice updating session sourceFiles in Firestore:", err);
+        }
       }
     }
   };
@@ -467,7 +507,7 @@ export default function Chat() {
         saveLocalSession(updated);
         setSessions(prev => prev.map(s => s.id === sessionId ? updated : s));
       }
-      setDoc(doc(db, 'chat_sessions', sessionId), {
+      if (!isDemoSession) setDoc(doc(db, 'chat_sessions', sessionId), {
         title: cleanTitle,
         lastUpdated: new Date().toISOString()
       }, { merge: true }).catch(err => console.warn("Rename notice:", err));
@@ -501,7 +541,7 @@ export default function Chat() {
       setDeleteConfirmSessionId(null);
       deleteLocalSession(idToDelete);
       setSessions(prev => prev.filter(s => s.id !== idToDelete));
-      deleteDoc(doc(db, 'chat_sessions', idToDelete)).catch(err => console.warn("Delete session notice:", err));
+      if (!isDemoSession) deleteDoc(doc(db, 'chat_sessions', idToDelete)).catch(err => console.warn("Delete session notice:", err));
       toast.success('Đã xóa cuộc hội thoại thành công');
       if (currentSession?.id === idToDelete) {
         setCurrentSession(null);
@@ -526,7 +566,13 @@ export default function Chat() {
       setCurrentSession(null);
       setMessages([]);
 
-      const snapshot = await getDocs(collection(db, 'chat_sessions'));
+      if (!activeUserId) return;
+      if (isDemoSession) {
+        toast.dismiss(loadToastId);
+        toast.success('ÄÃ£ dá»n sáº¡ch toÃ n bá»™ lá»‹ch sá»­ há»™i thoáº¡i');
+        return;
+      }
+      const snapshot = await getDocs(query(collection(db, 'chat_sessions'), where('userId', '==', activeUserId)));
       const batch = writeBatch(db);
       snapshot.docs.forEach((d) => batch.delete(d.ref));
       await batch.commit().catch(() => {});
@@ -864,7 +910,7 @@ export default function Chat() {
                           : "bg-indigo-600 text-white font-semibold p-4 border-indigo-500 shadow-indigo-100/30"
                       )}>
                         <div className="markdown-body">
-                          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, rehypeKatex]}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, rehypeSanitize, rehypeKatex]}>
                             {m.content}
                           </ReactMarkdown>
                         </div>
