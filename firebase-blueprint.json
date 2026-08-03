@@ -1,0 +1,108 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information and roles.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "fullName": { "type": "string" },
+        "role": { "type": "string", "enum": ["SALES_ADMIN", "SALES_MANAGER", "SYSTEM_ADMIN"] },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "status"]
+    },
+    "SalesFile": {
+      "title": "Sales Data File",
+      "description": "Uploaded Excel/CSV file metadata.",
+      "type": "object",
+      "properties": {
+        "fileName": { "type": "string" },
+        "uploadDate": { "type": "string", "format": "date-time" },
+        "uploadedBy": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "PROCESSING", "COMPLETED", "ERROR"] },
+        "recordCount": { "type": "number" },
+        "metadata": { "type": "string" },
+        "embeddingStatus": { "type": "string", "enum": ["NONE", "PROCESSING", "READY", "FAILED"] }
+      },
+      "required": ["fileName", "uploadDate", "uploadedBy", "status"]
+    },
+    "SalesRecord": {
+      "title": "Sales Record",
+      "description": "Individual row from the sales data files.",
+      "type": "object",
+      "properties": {
+        "fileId": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "product": { "type": "string" },
+        "category": { "type": "string" },
+        "quantity": { "type": "number" },
+        "price": { "type": "number" },
+        "revenue": { "type": "number" },
+        "region": { "type": "string" },
+        "customer": { "type": "string" }
+      },
+      "required": ["fileId", "date", "revenue"]
+    },
+    "ChatSession": {
+      "title": "AI Chat Session",
+      "description": "History of AI assistant interactions.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "lastUpdated": { "type": "string", "format": "date-time" },
+        "sourceFiles": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["userId", "lastUpdated"]
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "Single message in a chat session.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "role": { "type": "string", "enum": ["user", "assistant"] },
+        "content": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "chartData": { "type": "object" }
+      },
+      "required": ["sessionId", "role", "content", "timestamp"]
+    },
+    "Report": {
+      "title": "Generated Report",
+      "description": "AI generated sales reports.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "generatedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "fileType": { "type": "string", "enum": ["PDF", "EXCEL"] },
+        "reportType": { "type": "string", "enum": ["DAILY", "WEEKLY", "MONTHLY", "CUSTOM"] }
+      },
+      "required": ["title", "content", "createdAt"]
+    },
+    "SystemConfig": {
+      "title": "System Configuration",
+      "description": "Global settings for AI and automation.",
+      "type": "object",
+      "properties": {
+        "geminiApiKey": { "type": "string" },
+        "modelName": { "type": "string" },
+        "systemPrompt": { "type": "string" },
+        "schedulerTime": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": { "schema": "User", "description": "User profile data." },
+    "/files/{fileId}": { "schema": "SalesFile", "description": "Sales file metadata." },
+    "/files/{fileId}/records/{recordId}": { "schema": "SalesRecord", "description": "Individual records from file." },
+    "/chat_sessions/{sessionId}": { "schema": "ChatSession", "description": "Chat session sessions." },
+    "/chat_sessions/{sessionId}/messages/{messageId}": { "schema": "ChatMessage", "description": "Chat messages." },
+    "/reports/{reportId}": { "schema": "Report", "description": "Generated reports." },
+    "/config/global": { "schema": "SystemConfig", "description": "Global system configuration." }
+  }
+}

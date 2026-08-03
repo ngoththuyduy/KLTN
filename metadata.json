@@ -1,0 +1,6 @@
+{
+  "name": "KLTN - AI Sales Intelligence Dashboard",
+  "description": "Hệ thống quản trị bán hàng tích hợp AI, hỗ trợ phân tích dữ liệu RAG, tự động sinh báo cáo và dự báo doanh số từ file Excel/CSV. Đã cấu hình Firebase thành công tại asia-east1.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
