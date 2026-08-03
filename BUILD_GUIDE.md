@@ -188,13 +188,13 @@ Quy trinh goi y:
 5. Cau hinh entry point uu tien cho Plesk/Passenger la:
 
 ```text
-plesk-start.cjs
+plesk_start
 ```
 
 6. Restart app tren host.
 7. Mo `/api/health` de kiem tra.
 
-Neu host khong cho dung `.cjs`, co the thu `app.js`, nhung Plesk/Passenger nen dung `plesk-start.cjs` vi file nay khoi dong backend production va tra JSON chan doan neu thieu `dist/server.js` hoac loi import.
+Neu host khong cho dung file khong duoi, co the thu `app.js`, nhung Plesk/Passenger nen dung `plesk_start` vi file nay khoi dong backend production va tra JSON chan doan neu thieu `dist/server.js` hoac loi import.
 
 ## 12. Lenh thuong dung
 
@@ -242,7 +242,7 @@ Dam bao startup file la `plesk-start.cjs` hoac `app.js`, khong dung file chi ser
 1. Doi startup file sang:
 
 ```text
-plesk-start.cjs
+plesk_start
 ```
 
 2. Restart app.

@@ -1,0 +1,80 @@
+import fs from 'fs';
+import path from 'path';
+import http from 'http';
+import { fileURLToPath, pathToFileURL } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const rootDir = path.dirname(__filename);
+const port = Number(process.env.PORT || '6612');
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex <= 0) continue;
+    const key = trimmed.slice(0, eqIndex).trim();
+    let value = trimmed.slice(eqIndex + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!process.env[key]) {
+      process.env[key] = value;
+    }
+  }
+}
+
+loadEnvFile(path.join(rootDir, '.env'));
+loadEnvFile(path.join(rootDir, '.env.local'));
+loadEnvFile(path.join(process.cwd(), '.env'));
+loadEnvFile(path.join(process.cwd(), '.env.local'));
+
+process.env.NODE_ENV = process.env.NODE_ENV || 'production';
+process.env.PORT = String(port);
+
+function startDiagnosticServer(error) {
+  const message = error && error.stack ? error.stack : String(error || 'Unknown startup error');
+  console.error('[Plesk Start] Failed to start backend:', message);
+
+  http.createServer((req, res) => {
+    const payload = {
+      status: 'startup_error',
+      message: 'Backend could not start. This diagnostic startup file is running.',
+      rootDir,
+      cwd: process.cwd(),
+      node: process.version,
+      port,
+      startupFile: 'plesk_start',
+      distServerExists: fs.existsSync(path.join(rootDir, 'dist', 'server.js')),
+      packageJsonExists: fs.existsSync(path.join(rootDir, 'package.json')),
+      nodeModulesExists: fs.existsSync(path.join(rootDir, 'node_modules')),
+      envFileExists: fs.existsSync(path.join(rootDir, '.env')),
+      geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()),
+      error: message
+    };
+
+    res.statusCode = req.url && req.url.startsWith('/api/health') ? 500 : 503;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify(payload, null, 2));
+  }).listen(port, '0.0.0.0', () => {
+    console.log('[Plesk Start] Diagnostic server listening on port', port);
+  });
+}
+
+try {
+  const serverPath = path.join(rootDir, 'dist', 'server.js');
+  if (!fs.existsSync(serverPath)) {
+    throw new Error('Missing dist/server.js. Run npm install && npm run build on the host.');
+  }
+
+  const serverModule = await import(pathToFileURL(serverPath).href);
+  if (typeof serverModule.startServer !== 'function') {
+    throw new Error('dist/server.js does not export startServer(). Rebuild the project.');
+  }
+
+  await serverModule.startServer();
+} catch (error) {
+  startDiagnosticServer(error);
+}
